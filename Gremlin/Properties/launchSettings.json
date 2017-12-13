@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "Gremlin": {
+      "commandName": "Project",
+      "environmentVariables": {
+        "CosmosDB:authKey": "PlWrnCh7nMkThOpSUkjvMzA9Cc8rTKg3O6WwyD6Qkd1QdJpv3VPr9l56z7LlAWyGkjFmsh5qxxxrFfWKmhDJyg=="
+      }
+    }
+  }
+}
