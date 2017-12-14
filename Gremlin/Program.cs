@@ -26,10 +26,6 @@ namespace Gremlin
                     .Build();
                 configuration = new Config();
                 builder.GetSection("CosmosDB").Bind(configuration);
-                Console.WriteLine("Fetching collection");
-                var people = await GetStarWarsPeople();
-                foreach (var person in people)
-                    Console.WriteLine(person.ToString());
                 Console.WriteLine($"Connecting with {configuration.Endpoint} - {configuration.AuthKey}");
                 using (var client = new DocumentClient(new Uri(configuration.Endpoint), configuration.AuthKey))
                 {
@@ -39,12 +35,31 @@ namespace Gremlin
                         UriFactory.CreateDatabaseUri(configuration.DatabaseName),
                         new DocumentCollection { Id = configuration.CollectionName },
                         new RequestOptions { OfferThroughput = 1000 });
-                    await AddThing(client, graph);
+                    var command = "";
+                    while (!command.Trim().Equals("q", StringComparison.InvariantCultureIgnoreCase))
+                    {
+                        Console.WriteLine("1. Rebuild database");
+                        Console.WriteLine("2. Query");
+                        Console.WriteLine("q. Quit");
+                        command = Console.ReadLine();
+                        if (command.Trim() == "1")
+                        {
+                            Console.WriteLine("Fetching collection");
+                            var swGraph = await new StarWarsGraphGetter().Get();
+                            await PopulateGraph(swGraph, client, graph);
+                            Console.WriteLine("Done loading graph");
+                        }
+                        if (command.Trim() == "2")
+                        {
+                            await PresentQueryMenu(client, graph);
+                        }
+                    }
                 }
+
                 Console.WriteLine("done.");
                 Console.ReadLine();
             }
-            catch(Exception ex)
+            catch (Exception ex)
             {
                 Console.Error.Write(ex.Message);
                 Console.Error.Write(ex);
@@ -52,31 +67,88 @@ namespace Gremlin
             }
         }
 
-        private static async Task<IEnumerable<Person>> GetStarWarsPeople()
+        private static async Task PopulateGraph(StarWarsGraph swGraph, DocumentClient client, DocumentCollection graph)
         {
-            var httpClient = new HttpClient();
-            httpClient.BaseAddress =new Uri("https://swapi.co");
-            httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-            var httpResult = await httpClient.GetAsync("/api/people");
-            var result = await httpResult.Content.ReadAsStringAsync();
-            var models = JsonConvert.DeserializeObject<Models.SWAPI.PersonEnvelope>(result);
-            return models.results.Select(x => new Person
-            {
-                Id = int.Parse(x.url.Trim('/').Split('/').Last()),
-                Name = x.name, 
-                BirthYear = x.birth_year,
-                EyeColour = x.eye_color, 
-                HeightInCm = int.Parse(x.height),
-                StarShips = x.starships.Select(y=> int.Parse(y.Trim('/').Split('/').Last())).ToList()
-            });
+            await Clear(client, graph);
+            await AddPeople(client, graph, swGraph.People);
+            await AddStarships(client, graph, swGraph.Starships);
+            await AddPeopleStarshipEdges(client, graph, swGraph.People);
         }
 
-        private static async Task AddThing(DocumentClient client, DocumentCollection graph)
+        static async Task PresentQueryMenu(DocumentClient client, DocumentCollection graph)
+        {
+            var readString = "";
+            while (!readString.Trim().Equals("q", StringComparison.InvariantCultureIgnoreCase))
+            {
+                Console.WriteLine("Pick a query:");
+                Console.WriteLine("1. All people");
+                Console.WriteLine("2. All starships");
+                Console.WriteLine("3. All starships with a crew > 10 000");
+                Console.WriteLine("4. People who served on starships with a length > 100m");
+                Console.WriteLine("5. People who served together");
+                Console.WriteLine("q. Quit");
+                readString = Console.ReadLine().Trim();
+                var query = "";
+                switch (readString)
+                {
+                    case "1":
+                        query = "g.V().hasLabel('person')";
+                        break;
+                    case "2":
+                        query = "g.V().hasLabel('starship')";
+                        break;
+                    case "3":
+                        query = "g.V().hasLabel('starship').has('crew', gt(10000))";
+                        break;
+                    case "4":
+                        query = "g.V().hasLabel('starship').has('length', gt(100)).inE('servedOn').outV().dedup()";
+                        break;
+                    case "5":
+                        query = "g.V().hasLabel('person').as('a').outE('servedOn').inV().as('c').inE('servedOn').outV().as('b').select('a','b','c').by('name').where('a',neq('b'))";
+                        break;
+                }
+                if (!String.IsNullOrEmpty(query))
+                {
+                    var graphQuery = client.CreateGremlinQuery(graph, query);
+                    do
+                    {
+                        var chunk = await graphQuery.ExecuteNextAsync();
+                        Console.WriteLine($"\t {JsonConvert.SerializeObject(chunk, Formatting.Indented)}");
+
+                    } while (graphQuery.HasMoreResults);
+                }
+            }
+
+        }
+
+        private static async Task Clear(DocumentClient client, DocumentCollection graph)
         {
             var clearQuery = client.CreateGremlinQuery(graph, "g.v().drop()");
             await clearQuery.ExecuteNextAsync();
-            await client.CreateGremlinQuery(graph, "g.addV('person').property('id', 'simon').property('firstName', 'Simon')").ExecuteNextAsync();
-            
+        }
+
+        private static async Task AddPeople(DocumentClient client, DocumentCollection graph, IEnumerable<Person> people)
+        {
+            foreach (var person in people)
+                await client.CreateGremlinQuery(graph, $"g.addV('person').property('id', 'person:{person.Id}').property('name', '{person.Name}')").ExecuteNextAsync();
+
+        }
+
+        private static async Task AddStarships(DocumentClient client, DocumentCollection graph, IEnumerable<Starship> starships)
+        {
+            foreach (var starship in starships)
+                await client.CreateGremlinQuery(graph, $@"g.addV('starship').property('id', 'starship:{starship.Id}')
+                                                            .property('name', '{starship.Name}')
+                                                            .property('manufacturer', '{starship.Manufacturer}')
+                                                            .property('crew', {starship.Crew})
+                                                            .property('length', {starship.Length})").ExecuteNextAsync();
+
+        }
+        private static async Task AddPeopleStarshipEdges(DocumentClient client, DocumentCollection graph, IEnumerable<Person> people)
+        {
+            foreach (var person in people)
+                foreach (var starship in person.StarShips)
+                    await client.CreateGremlinQuery(graph, $"g.V('person:{person.Id}').addE('servedOn').to(g.V('starship:{starship}'))").ExecuteNextAsync();
         }
     }
 }
